@@ -278,13 +278,15 @@ the `MviDelegate` / `MviDelegateImpl` pattern.
   inject the mapper as a constructor parameter and delegate to it. Register mappers as `factory`
   in the feature's DI module. A mapper maps domain model(s) to UI model(s) only — it does not
   decide which sealed `UiState` to wrap the result in.
-- **Price/date formatting:** currently formatted inline inside mappers
-  (`"R$ %.2f".format(...)`, safe since mappers stay Android-only-string-formatting-free by using
-  plain string templates) and inside `CheckoutUseCase` via `kotlinx-datetime`
-  (`Clock.System.now().toLocalDateTime(...)`, manual zero-padding) — **not** `java.text.SimpleDateFormat`,
-  which doesn't exist outside the JVM and would break the iOS build since this class lives in
-  commonMain. No shared `Formatter` utility yet — introduce one if formatting logic starts
-  duplicating across more than a couple of mappers.
+- **Price formatting:** `Double.toPriceLabel()` (`common/CurrencyFormat.kt`) — a "R$ 0.00"-style
+  extension used by every `*UiModelMapper` (`ProductUiModelMapper`, `ProductDetailUiModelMapper`,
+  `OrderSummaryUiModelMapper`, `OrderUiModelMapper`). Rounds/pads by hand instead of
+  `String.format`/`"%.2f"`, which are JVM-only and would break the iOS build.
+- **Date formatting:** inline inside `CheckoutUseCase` via `kotlinx-datetime`
+  (`Clock.System.now().toLocalDateTime(...)`, manual zero-padding) — **not**
+  `java.text.SimpleDateFormat`, which doesn't exist outside the JVM and would break the iOS build
+  since this class lives in commonMain. No shared date-formatting utility yet — introduce one if
+  it starts duplicating across more than a couple of call sites.
 - **commonMain platform safety:** anything under `shared/src/commonMain` compiles for iOS too —
   never import `java.*` or `android.*` there. If you need a genuinely platform-specific API, use
   Kotlin `expect`/`actual` (see the Ktor HTTP engine setup in `shared/build.gradle.kts` for a case
