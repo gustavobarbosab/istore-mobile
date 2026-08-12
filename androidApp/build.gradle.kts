@@ -3,7 +3,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeCompiler)
-    alias(libs.plugins.kotlinSerialization)
 }
 
 kotlin {
@@ -11,32 +10,19 @@ kotlin {
         jvmTarget = JvmTarget.JVM_11
     }
 }
+
+// androidApp is now a thin launcher: MainActivity just hosts `App()` from
+// :shared (domain/data/ui all live in shared/commonMain, shared with iOS).
+// Only Compose runtime/tooling is needed directly here.
 dependencies {
     implementation(project(":shared"))
 
     implementation(libs.androidx.activity.compose)
+    implementation(libs.compose.runtime)
+    implementation(libs.compose.ui)
 
     implementation(libs.compose.uiToolingPreview)
     debugImplementation(libs.compose.uiTooling)
-
-    // compose ui toolkit (shared module keeps these as `implementation`, so androidApp
-    // needs its own declaration to build screens/navigation directly here)
-    implementation(libs.compose.runtime)
-    implementation(libs.compose.foundation)
-    implementation(libs.compose.material3)
-    implementation(libs.compose.ui)
-
-    // navigation
-    implementation(libs.navigation.compose)
-
-    // koin - dependency injection
-    implementation(libs.koin.compose)
-    implementation(libs.koin.viewmodel)
-    implementation(libs.koin.navigation)
-
-    // serialization - used for type-safe navigation routes
-    implementation(libs.kotlinx.serialization.json)
-
 }
 
 android {

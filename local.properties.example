@@ -1,0 +1,10 @@
+# Copy this file to "local.properties" (already gitignored) and fill in real
+# values. local.properties is never committed, so this is the only place the
+# expected keys are documented.
+
+sdk.dir=/path/to/your/Android/sdk
+
+# API Gateway config, read by shared/build.gradle.kts's generateGatewayConfig
+# task and exposed to commonMain (used by both the Android and iOS targets).
+gateway.baseUrl=https://api.istore.dev
+gateway.apiKey=CHANGE_ME

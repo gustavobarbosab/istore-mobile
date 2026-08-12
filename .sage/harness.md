@@ -7,6 +7,29 @@
 - **Description:** Checkout app exercise (KMP + Compose Multiplatform), integrated with a
   BFF/API Gateway architecture backed by messaging for async payment processing.
 
+## Module Layout
+
+- **`shared`** — the real app. `domain`, `data`, and `ui` (screens, navigation, DI, theme) all
+  live in `shared/src/commonMain/kotlin/io/github/gustavobarbosab/istore/` and are compiled for
+  both Android and iOS. `App()` (`shared/.../App.kt`) is the single shared entry point:
+  `IStoreApplication { IStoreTheme { AppNavigation() } }`.
+- **`androidApp`** — a thin Android launcher only. Contains just `ui/MainActivity.kt`
+  (`ComponentActivity` calling `setContent { App() }`), the manifest, and Android-only resources
+  (launcher icon mipmaps/adaptive-icon XML, `strings.xml`). No domain/data/ui/business code
+  belongs here — if you're adding a screen, use case, repository, or anything reusable, it goes in
+  `shared/commonMain`, not `androidApp`.
+- **`iosApp`** — the Xcode project. `iOSApp.swift` → `ContentView.swift` → `MainViewController()`
+  (`shared/src/iosMain/.../MainViewController.kt`) → `App()`. This wiring already existed from the
+  KMP wizard template and did not need to change — only `App()`'s *content* changed (from the demo
+  screen to the real app).
+- **Platform-specific code** only exists where the platform genuinely differs: the Ktor HTTP
+  engine (`shared/src/androidMain` uses OkHttp, `shared/src/iosMain` uses Darwin — wired via Gradle
+  dependencies, no `expect`/`actual` needed since `HttpClient { }` in commonMain auto-picks
+  whichever engine is on the target's classpath).
+- **Do NOT** put a screen, use case, repository, mapper, or any other reusable class in
+  `androidApp` — it won't be visible to iOS. `androidApp` may only contain
+  Android-entry-point/manifest/resource concerns.
+
 ## SDK & Versions
 
 | Key        | Value  |
@@ -28,8 +51,9 @@
     - `repository/` — repository **interfaces** only.
     - `usecase/` — one class per use case, exposing a single `suspend operator fun invoke(...)`.
 - `data` — implements the domain's repository interfaces.
-    - `remote/` — `*RemoteDataSource`, simulating BFF/API Gateway calls (mocked with `delay`,
-      no real network client yet).
+    - `remote/` — `*RemoteDataSource`, calling the API Gateway via the shared Ktor `HttpClient`
+      (see Networking & Data below). Endpoints that don't exist in a real gateway on purpose
+      (e.g. the simulated payment worker) stay mocked with `delay` and are documented as such.
     - `local/` — `*LocalDataSource`, in-memory cache (plain `MutableList`/nullable var held in a
       Koin `single`, no TTL/eviction — good enough for the skeleton).
     - `repository/` — `*RepositoryImpl`, orchestrates local cache + remote data source
@@ -118,8 +142,26 @@ the `MviDelegate` / `MviDelegateImpl` pattern.
 
 ## Networking & Data
 
-- **HTTP client:** Ktor (planned — not yet active; all remote data sources are mocked).
-- **Serialization:** `kotlinx.serialization` (currently only used for typed navigation routes).
+- **HTTP client:** Ktor, `OkHttp` engine. One `HttpClient` singleton, provided by
+  `data/remote/network/GatewayHttpClient.kt` and registered as `single<HttpClient>` in
+  `AppModule` — every `*RemoteDataSource` takes it as a constructor parameter (Koin resolves it
+  automatically). Do not create a second `HttpClient` instance per data source.
+- **Auth:** the Gateway expects a static `X-API-Key` header. It's attached once, as a
+  `defaultRequest` header, inside `GatewayHttpClient.kt` — data sources never read or pass the
+  key themselves.
+- **Config:** `data/remote/network/GatewayConfig.kt` exposes `baseUrl`/`apiKey`, sourced from
+  `GeneratedGatewayConfig` — a Kotlin file the `generateGatewayConfig` Gradle task
+  (`shared/build.gradle.kts`) writes into `commonMain` at build time, reading `gateway.baseUrl` /
+  `gateway.apiKey` from the root `local.properties` (see `local.properties.example`). This is the
+  multiplatform stand-in for Android's `BuildConfig` — it works the same way for both the Android
+  target and the iOS/Kotlin-Native target, since it's plain generated commonMain source, not an
+  Android-only mechanism. **Never hardcode the real api key**; it must only ever live in the
+  gitignored `local.properties`.
+- **Wire format:** each remote endpoint has a `*Dto` (`@Serializable`) in `data/remote/dto/`, plus
+  a `toDomain()` extension mapping it to the matching `domain/model`. Domain models are never
+  annotated `@Serializable` or used directly as request/response bodies.
+- **Serialization:** `kotlinx.serialization` — used for both typed navigation routes and now the
+  Ktor `ContentNegotiation` JSON codec.
 - **Persistence:** none yet — local data sources are plain in-memory caches, reset on process
   death.
 - **Pattern:** Repository pattern with `*LocalDataSource` and `*RemoteDataSource` per domain,
@@ -127,13 +169,40 @@ the `MviDelegate` / `MviDelegateImpl` pattern.
 - **Caching:** cache-first, in-memory only (see `ProductLocalDataSource`, `OrderLocalDataSource`).
   `OrderLocalDataSource` also acts as the target of a simulated background "worker" (see below).
 
+## Error Handling
+
+- **Repository/use case return type:** every `domain/repository/*Repository` method and every
+  `domain/usecase/*UseCase` return `Ior<DataError, T>` (Arrow) instead of throwing or returning `T`
+  directly. `DataError` (`domain/error/DataError.kt`) is a sealed class covering `Network`, `Http`,
+  `Serialization`, and `Unknown` failures.
+- **Where exceptions actually get caught:** `data/remote/network/SafeApiCall.kt`'s `safeApiCall {
+  }` is the *only* place that catches Ktor/serialization exceptions and converts them into
+  `DataError`. Every `*RemoteDataSource` method that hits the network wraps its call in
+  `safeApiCall { ... }` and returns the resulting `Ior<DataError, T>` — repositories then just
+  propagate or `.map`/fold that result (see `ProductRepositoryImpl`, `PaymentRepositoryImpl`, and
+  `CheckoutUseCase` for how multiple `Ior`-returning calls get chained via `getOrNull()`/
+  `leftOrNull()`). This is deliberate: repositories/use cases never write their own `try/catch` —
+  duplicating that per call site is exactly what `safeApiCall` exists to avoid.
+- **`Ior` vs `Both`:** `Ior` (Left/Right/**Both**) was chosen over a plain `Either` at the
+  data/domain boundary in case a future case wants to report a partial success (e.g. serving stale
+  cached data *and* a warning that the background refresh failed) — but nothing in this app
+  produces `Both` today; every real result is `Left` or `Right`.
+- **UI boundary:** ViewModels don't handle `Both` — call `.toEither()` on the `Ior` returned by the
+  use case (Arrow's built-in conversion; `Both` becomes `Either.Right`, i.e. treated as success)
+  and `.fold(ifLeft = ..., ifRight = ...)` from there, mapping `ifLeft` to the screen's `Error`
+  `UiState` and `ifRight` to `Ready`/`Empty`. See `HomeViewModel.loadProducts()`,
+  `DetailViewModel.loadProduct()`, `CheckoutViewModel`, `HistoryViewModel.loadOrders()` for the
+  pattern. Every screen that loads data has a dedicated `Error` `UiState` + a retry `Event`
+  (`OnRetryClicked` / reusing `OnRefresh` for History) wired to a "Retry" button in
+  `*ScreenContent.kt` — none of them let a Gateway failure crash the app.
+
 ## Async & Concurrency
 
 - **Async:** Kotlin Coroutines.
 - **Scopes:** `viewModelScope` in ViewModels. `PaymentRepositoryImpl` owns a dedicated
   `CoroutineScope(SupervisorJob() + Dispatchers.Default)` to simulate the payment worker
   continuing to run in the background after `checkout()` returns (mirrors the "no polling —
-  result appears later in Meus Pedidos" architecture decision).
+  result appears later in My Orders" architecture decision).
 - **Dispatchers:** not yet abstracted behind a `CoroutineDispatcherProvider` — introduce one if/when
   dispatcher injection becomes necessary for testing.
 
@@ -167,6 +236,21 @@ the `MviDelegate` / `MviDelegateImpl` pattern.
   subpackage instead.
 - Pass a screen's `sealed *Event` type as a parameter into a `component/` composable — components
   take plain lambdas so they don't depend on a specific screen's contract.
+- Write a `try/catch` around an HTTP call in a `*RemoteDataSource` — go through `safeApiCall { }`
+  instead, so error handling stays in one place.
+- Return `T` or throw from a repository/use case method — return `Ior<DataError, T>`.
+- Fold/handle `Ior.Both` inside a ViewModel — convert to `Either` via `.toEither()` first and only
+  handle `ifLeft`/`ifRight`.
+- Let a Gateway/network failure propagate uncaught out of a ViewModel's `viewModelScope.launch` —
+  every use case call that can fail must be folded into the screen's `Error` `UiState`.
+- Hardcode the API Gateway key/URL, or read it from anywhere other than `local.properties` via
+  `GatewayConfig`/`GeneratedGatewayConfig`.
+- Instantiate a second `HttpClient` — inject the one Koin `single` from `AppModule`.
+- Serialize/deserialize a `domain/model` directly over the wire — always go through a `*Dto` +
+  `toDomain()`.
+- Add a new screen, use case, repository, or any other business/reusable code under `androidApp` —
+  it belongs in `shared/commonMain` so iOS gets it too.
+- Import `java.*` or `android.*` anywhere under `shared/src/commonMain` — it won't compile for iOS.
 
 ## Best Practices & Conventions
 
@@ -179,8 +263,9 @@ the `MviDelegate` / `MviDelegateImpl` pattern.
   composable (e.g. `component/ProductCard.kt`, `component/ProductList.kt`,
   `component/StatusBadge.kt`). `*ScreenContent.kt` composes them together per `UiState` branch
   and wires screen `Event`s to the plain callbacks components expose.
-- **Domain models:** live in `domain/model/`, no suffix (e.g. `Product`, not `ProductDto`) — there
-  is no DTO layer yet since remote data sources are mocked in-process.
+- **Domain models:** live in `domain/model/`, no suffix (e.g. `Product`, not `ProductDto`) and are
+  never `@Serializable`. Wire formats live separately as `data/remote/dto/*Dto.kt` with a
+  `toDomain()` mapper.
 - **Repository interfaces:** `domain/repository/*Repository.kt`.
 - **Use cases:** `domain/usecase/*UseCase.kt`, one per use case, single
   `suspend operator fun invoke(...)` entry point.
@@ -193,7 +278,16 @@ the `MviDelegate` / `MviDelegateImpl` pattern.
   inject the mapper as a constructor parameter and delegate to it. Register mappers as `factory`
   in the feature's DI module. A mapper maps domain model(s) to UI model(s) only — it does not
   decide which sealed `UiState` to wrap the result in.
-- **Price/date formatting:** currently formatted inline inside mappers (`"R$ %.2f".format(...)`,
-  `SimpleDateFormat` in `CheckoutUseCase`). No shared `Formatter` utility yet — introduce one if
-  formatting logic starts duplicating across more than a couple of mappers.
+- **Price/date formatting:** currently formatted inline inside mappers
+  (`"R$ %.2f".format(...)`, safe since mappers stay Android-only-string-formatting-free by using
+  plain string templates) and inside `CheckoutUseCase` via `kotlinx-datetime`
+  (`Clock.System.now().toLocalDateTime(...)`, manual zero-padding) — **not** `java.text.SimpleDateFormat`,
+  which doesn't exist outside the JVM and would break the iOS build since this class lives in
+  commonMain. No shared `Formatter` utility yet — introduce one if formatting logic starts
+  duplicating across more than a couple of mappers.
+- **commonMain platform safety:** anything under `shared/src/commonMain` compiles for iOS too —
+  never import `java.*` or `android.*` there. If you need a genuinely platform-specific API, use
+  Kotlin `expect`/`actual` (see the Ktor HTTP engine setup in `shared/build.gradle.kts` for a case
+  that turned out to *not* need `expect`/`actual`, resolved via per-source-set Gradle dependencies
+  instead).
 - **Code style:** No linter enforced.

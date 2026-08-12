@@ -6,8 +6,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
-import io.github.gustavobarbosab.istore.ui.navigation.AppNavigation
-import io.github.gustavobarbosab.istore.ui.theme.IStoreTheme
+import io.github.gustavobarbosab.istore.App
+
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -15,22 +15,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         setContent {
-            IStoreApp()
-        }
-    }
-}
-
-@Composable
-private fun IStoreApp() {
-    IStoreApplication {
-        IStoreTheme {
-            AppNavigation()
+            App()
         }
     }
 }
 
 @Preview
 @Composable
-fun AppAndroidPreview() {
-    IStoreApp()
+private fun AppAndroidPreview() {
+    App()
 }
